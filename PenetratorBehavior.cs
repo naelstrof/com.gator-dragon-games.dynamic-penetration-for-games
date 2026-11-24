@@ -44,6 +44,14 @@ public class PenetratorBehavior : MonoBehaviour {
         });
     }
 #endif
+
+    public Transform GetBone(int index) {
+        return bones[index];
+    }
+    
+    public int GetBoneCount() {
+        return bones.Length;
+    }
     
     private Penetrator GetPenetrator() {
         return new Penetrator() {
@@ -52,6 +60,8 @@ public class PenetratorBehavior : MonoBehaviour {
             penetratorLength = boneChainOnCurve.GetTotalLength()
         };
     }
+
+    public Penetration GetPenetration() => penetration;
 
     private void OnEnable() {
         boneChainOnCurve = new BoneChainOnCurve(bones);
@@ -64,7 +74,7 @@ public class PenetratorBehavior : MonoBehaviour {
     private void OnDisable() {
         JigglePhysics.JigglePhysics.JigglePoseCompleted -= OnJigglePoseCompleted;
     }
-
+    
     private void LateUpdate() {
         if (penetrableBehavior == null) {
             if (penetratorJiggle.GetBlend() < 1f) penetratorJiggle.SetBlend(1f);
@@ -107,6 +117,10 @@ public class PenetratorBehavior : MonoBehaviour {
             if (bones == null || bones.Length < 1 || bones[0] == null) return;
             skinnedMeshGirth.DrawGizmos(ref penetrationGirthFrame, skinnedMeshRendererMask.renderer, new SkinnedMeshGirth.SkinnedMeshGirthSampler(skinnedMeshRendererMask.renderer), bones[0], GirthFrame.GirthFrameSamples);
         }
+    }
+
+    public void SetLinkedPenetrable(PenetrableBehavior penetrableBehavior) {
+        this.penetrableBehavior = penetrableBehavior;
     }
 }
 
