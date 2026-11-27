@@ -24,9 +24,6 @@ public class PenetratorBehavior : MonoBehaviour {
     private GirthFrame penetrationGirthFrame;
     private SkinnedMeshGirth.SkinnedMeshGirthSampler skinnedMeshGirthSampler;
     
-    // TODO: Maybe splines should be a struct??
-    private Spline3D reusableSpline3D = new Spline3D();
-
 #if UNITY_EDITOR
     [ContextMenu("Generate Girth Lookup")]
     private void GenerateGirthLookup() {
@@ -63,6 +60,7 @@ public class PenetratorBehavior : MonoBehaviour {
 
     private void OnDisable() {
         JigglePhysics.JigglePhysics.JigglePoseCompleted -= OnJigglePoseCompleted;
+        boneChainOnCurve.Dispose();
     }
 
     private void LateUpdate() {
@@ -72,25 +70,26 @@ public class PenetratorBehavior : MonoBehaviour {
         }
         Penetrator penetrator = GetPenetrator();
         var penetrable = penetrableBehavior.GetPenetrable();
-        penetration = new Penetration(penetrator, penetrable, cachedPoints, reusableSpline3D);
+        penetration = new Penetration(penetrator, penetrable, cachedPoints);
             
         var orificeDist = penetration.spline3D.GetDistanceFromTime(penetration.penetrableT);
         boneChainCompression.Tick(orificeDist);
-        var lengthMultiplier = boneChainCompression.GetTipPosition() / boneChainOnCurve.GetRestLength();
-        penetration.Render(boneChainOnCurve, lengthMultiplier);
-        
-        float penetrableDistance = penetration.spline3D.GetDistanceFromTime(penetration.penetrableT);
-        float penetratorTipDistance = penetration.spline3D.GetDistanceFromTime(penetration.tipT);
-
-        float jiggleBlendDistance = 1f;
-        float jiggleBlend = Mathf.Clamp01((penetrableDistance - penetratorTipDistance)/jiggleBlendDistance);
-        penetratorJiggle.SetBlend(jiggleBlend);
+        //var lengthMultiplier = boneChainCompression.GetTipPosition() / boneChainOnCurve.GetRestLength();
+        boneChainOnCurve.StartRender();
     }
 
     private void OnJigglePoseCompleted() {
         if (penetrableBehavior == null) {
             return;
         }
+        
+        float jiggleBlendDistance = 1f;
+        float penetrableDistance = penetration.spline3D.GetDistanceFromTime(penetration.penetrableT);
+        float penetratorTipDistance = penetration.spline3D.GetDistanceFromTime(penetration.tipT);
+        float jiggleBlend = Mathf.Clamp01((penetrableDistance - penetratorTipDistance)/jiggleBlendDistance);
+        
+        boneChainOnCurve.FinishRender(ref penetration.spline3D, 1f-jiggleBlend);
+        
         skinnedMeshGirth.GetGirthFrame(ref penetrationGirthFrame, skinnedMeshRendererMask.renderer, skinnedMeshGirthSampler, bones[0]);
         
         PenetratorCollisionSpheresAuto.Render(penetrableBehavior.GetRenderers(), penetrationGirthFrame,0.25f, 0.5f, 32);
@@ -98,7 +97,6 @@ public class PenetratorBehavior : MonoBehaviour {
 
     private void OnDrawGizmosSelected() {
         if (Application.isPlaying) {
-            if (penetration.spline3D == null) return;
             if (bones == null || bones.Length < 1 || bones[0] == null) return;
             penetrationGirthFrame.DrawGizmos(GirthFrame.GirthFrameSamples, Color.grey, Color.white);
         } else {
