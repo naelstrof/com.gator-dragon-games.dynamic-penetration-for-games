@@ -77,12 +77,15 @@ public class PenetratorBehavior : MonoBehaviour {
         
         var orificeDist = penetration.spline3D.GetDistanceFromTime(penetration.penetrableT);
         var currentLength = boneChainOnCurve.GetTotalLength();
-        boneChainCompression.UpdateRestLength(currentLength, orificeDist);
         boneChainCompression.Tick(orificeDist);
-        var lengthMultiplier = boneChainCompression.GetTipPosition() / currentLength;
+        var lengthMultiplier = boneChainCompression.GetTipPosition() / boneChainOnCurve.GetBindLength();
         
         boneChainOnCurve.FinishRender(ref penetration.spline3D, 1f-jiggleBlend, lengthMultiplier);
         
+        //var aimPoint = penetration.spline3D.GetPositionFromDistance(boneChainOnCurve.GetTotalLength());
+        //Debug.DrawLine(aimPoint - Vector3.up * 0.1f, aimPoint + Vector3.up * 0.1f, Color.red);
+        //Debug.DrawLine(aimPoint - Vector3.left * 0.1f, aimPoint + Vector3.left * 0.1f, Color.red);
+        //Debug.DrawLine(aimPoint - Vector3.forward * 0.1f, aimPoint + Vector3.forward * 0.1f, Color.red);
         
         skinnedMeshGirth.GetGirthFrame(ref penetrationGirthFrame, skinnedMeshGirthSampler);
         

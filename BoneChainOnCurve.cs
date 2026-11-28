@@ -27,6 +27,7 @@ public struct BoneChainOnCurve : INativeDisposable {
     private NativeArray<AlignInstructions> _alignInstructions;
 
     private float _totalLength;
+    private float _bindLength;
 
     public BoneChainOnCurve(Transform[] bones) {
         var boneCount = bones.Length;
@@ -46,6 +47,8 @@ public struct BoneChainOnCurve : INativeDisposable {
             _totalLength += Vector3.Distance(lastPosition, pos);
             lastPosition = pos;
         }
+
+        _bindLength = _totalLength;
         _sampleHandle = default;
     }
     
@@ -172,7 +175,7 @@ public struct BoneChainOnCurve : INativeDisposable {
                     worldRotation = math.mul(rotation, _sampledBoneData[index].rotation)
                 };
             }
-            _totalLength.Value = math.dot(generalAxis, _sampledBoneData[^1].position - rootPosition);
+            _totalLength.Value = math.dot(generalAxis, _sampledBoneData[^1].position - rootPosition) * lengthMultiplier;
         }
     }
     
@@ -245,6 +248,7 @@ public struct BoneChainOnCurve : INativeDisposable {
     }
 
     public float GetTotalLength() => _totalLength;
+    public float GetBindLength() => _bindLength;
     public void Dispose() {
         if (!isValid) {
             return;
