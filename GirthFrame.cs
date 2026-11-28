@@ -15,18 +15,119 @@
  */
 
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
+using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Rendering;
 
 namespace GatorDragonGames.DPG {
 
+#if UNITY_EDITOR
+using UnityEditor;
+
+[CustomPropertyDrawer(typeof(GirthFrame))]
+public class GirthSliceCurveDrawer : PropertyDrawer {
+    private const float GraphHeight = 120f;
+    private const float LabelWidth = 55f;
+
+    public override float GetPropertyHeight(SerializedProperty property, GUIContent label) {
+        float height = EditorGUIUtility.singleLineHeight;
+        if (property.isExpanded) {
+            height += EditorGUIUtility.standardVerticalSpacing + GraphHeight;
+        }
+        return height;
+    }
+
+    public override void OnGUI(Rect position, SerializedProperty property, GUIContent label) {
+        EditorGUI.BeginProperty(position, label, property);
+
+        Rect header = new Rect(position.x, position.y, position.width, EditorGUIUtility.singleLineHeight);
+        property.isExpanded = EditorGUI.Foldout(header, property.isExpanded, label, true);
+
+        if (property.isExpanded) {
+            Rect graphArea = new Rect(
+                position.x,
+                header.yMax + EditorGUIUtility.standardVerticalSpacing,
+                position.width,
+                GraphHeight
+            );
+
+            if (property.hasMultipleDifferentValues) {
+                EditorGUI.HelpBox(graphArea, "Selected curves have different values.", MessageType.Info);
+            } else {
+                var frame = (GirthFrame)property.boxedValue;
+                DrawGraph(graphArea, frame);
+            }
+        }
+
+        EditorGUI.EndProperty();
+    }
+
+    private static void DrawGraph(Rect area, GirthFrame frame) {
+        float min = 0f;
+        float max = 0f;
+        for (int i = 0; i < GirthSliceCurve.sampleCount; i++) {
+            float radius = frame.girthCurve.GetSample(i).radius;
+            if (float.IsNaN(radius) || float.IsInfinity(radius)) {
+                EditorGUI.HelpBox(area, "The curve contains a non-finite radius.", MessageType.Warning);
+                return;
+            }
+            min = Mathf.Min(min, radius);
+            max = Mathf.Max(max, radius);
+        }
+
+        if (Mathf.Approximately(min, max)) {
+            max = min + 1f;
+        }
+
+        Rect graph = new Rect(
+            area.x + LabelWidth,
+            area.y + 2f,
+            Mathf.Max(1f, area.width - LabelWidth - 4f),
+            area.height - 22f
+        );
+
+        EditorGUI.DrawRect(graph, new Color(0.12f, 0.12f, 0.12f));
+        GUI.Label(new Rect(area.x, graph.y, LabelWidth, 20f), max.ToString("F4", CultureInfo.CurrentCulture), EditorStyles.miniLabel);
+        GUI.Label(new Rect(area.x, graph.yMax - 16f, LabelWidth, 20f), min.ToString("F4", CultureInfo.CurrentCulture), EditorStyles.miniLabel);
+        GUI.Label(new Rect(graph.x, graph.yMax + 2f, graph.width, 18f),
+            "Sample position: 0 to 1   |   Radius", EditorStyles.miniLabel);
+
+        if (Event.current.type != EventType.Repaint) {
+            return;
+        }
+
+        var points = new Vector3[GirthSliceCurve.sampleCount];
+        for (int i = 0; i < GirthSliceCurve.sampleCount; i++) {
+            float x = GirthSliceCurve.sampleCount == 1 ? 0f : (float)i / (GirthSliceCurve.sampleCount - 1);
+            float y = Mathf.InverseLerp(min, max, frame.girthCurve.GetSample(i).radius);
+            points[i] = new Vector3(
+                Mathf.Lerp(graph.x, graph.xMax, x),
+                Mathf.Lerp(graph.yMax, graph.y, y),
+                0f
+            );
+        }
+
+        Handles.BeginGUI();
+        Color previousColor = Handles.color;
+        Handles.color = Color.cyan;
+        if (points.Length == 1) {
+            EditorGUI.DrawRect(new Rect(points[0].x - 2f, points[0].y - 2f, 4f, 4f), Color.cyan);
+        } else {
+            Handles.DrawAAPolyLine(2f, points);
+        }
+        Handles.color = previousColor;
+        Handles.EndGUI();
+    }
+}
+#endif
+
 [System.Serializable]
 public struct GirthFrame {
-    public const int GirthFrameSamples = 64;
     public static Matrix4x4 GetDefaultPenetratorPose() => Matrix4x4.TRS(Vector3.zero, Quaternion.LookRotation(Vector3.up,-Vector3.forward), Vector3.one);
 
     public float maxGirthRadius;
@@ -40,22 +141,20 @@ public struct GirthFrame {
     
     public void TransformToWorld(Matrix4x4 transform) {
         var mat = transform*GetDefaultPenetratorPose();
-        var samples = girthCurve.GetSampleCount();
+        var radiusScale = mat.MultiplyVector(Vector3.right).magnitude;
+        var samples = GirthSliceCurve.sampleCount;
         for (int i = 0; i < samples; i++) {
             var slice = girthCurve.GetSample(i);
             slice.position = mat.MultiplyPoint3x4(slice.position);
+            slice.radius *= radiusScale;
             girthCurve.SetSample(i, slice);
         }
-    }
-
-    public void OnValidate() {
-        girthCurve.OnValidate();
     }
     
     public GirthFrame(float fullLength, float maxGirth) {
         maxGirthRadius = maxGirth;
         maxLocalLength = fullLength;
-        girthCurve = new GirthSliceCurve(GirthFrameSamples);
+        girthCurve = new GirthSliceCurve();
     }
 
     public void DrawGizmos(int samples, Color startColor, Color endColor) {
@@ -64,7 +163,7 @@ public struct GirthFrame {
             float alpha = (float)i / (float)(samples - 1);
             Gizmos.color = Color.Lerp(startColor, endColor, alpha);
             GirthSlice slice = SampleGirth(alpha);
-            var diff = slice.position - lastPosition;
+            var diff = (Vector3)slice.position - lastPosition;
             DrawCircle(slice.position, diff.normalized, slice.radius, 16);
             lastPosition = slice.position;
         }
@@ -88,34 +187,21 @@ public struct GirthFrame {
         }
     }
 
-    public GirthFrame Clone() {
-        return new GirthFrame {
-            maxGirthRadius = maxGirthRadius,
-            maxLocalLength = maxLocalLength,
-            girthCurve = girthCurve.Clone(),
-        };
-    }
-    public void Clone(ref GirthFrame output) {
-        output.maxGirthRadius = maxGirthRadius;
-        output.maxLocalLength = maxLocalLength;
-        girthCurve.Clone(ref output.girthCurve);
-    }
-
     public void SampleBlendshapes(GirthFrame[] blendshapes, SkinnedMeshGirth.SkinnedMeshGirthSampler sampler) {
-        var samples = girthCurve.GetSampleCount();
         var blendshapeCount = blendshapes.Length;
-
-        for (int i = 0; i < samples; i++) {
-            var girthSlice = girthCurve.GetSample(i);
-            for (int j = 0; j < blendshapeCount; j++) {
-                float weight = sampler.blendshapes[j] * 0.01f;
-                if (weight == 0f) {
-                    continue;
-                }
-                girthSlice += blendshapes[j].girthCurve.GetSample(i) * weight;
-            }
-            girthCurve.SetSample(i, girthSlice);
-        }
+        using var girthFrame = new NativeReference<GirthFrame>(this, Allocator.TempJob);
+        using var blendShapeGirths = new NativeArray<GirthFrame>(blendshapes, Allocator.TempJob);
+        using var blendshapeWeights = new NativeArray<float>(sampler.blendshapes, Allocator.TempJob);
+        using var output = new NativeArray<GirthSlice>(GirthSliceCurve.sampleCount, Allocator.TempJob);
+        var job = new SampleBlendshapesJob(
+            girthFrame,
+            blendShapeGirths,
+            blendshapeWeights,
+            output,
+            blendshapeCount
+        );
+        job.Schedule(GirthSliceCurve.sampleCount, 16).Complete();
+        girthCurve.CopyFrom(job.output);
 
         for (int j = 0; j < blendshapeCount; j++) {
             float weight = sampler.blendshapes[j] * 0.01f;
@@ -126,7 +212,33 @@ public struct GirthFrame {
             maxLocalLength += blendshapes[j].maxLocalLength * weight;
         }
     }
-    
+
+    [BurstCompile]
+    public struct SampleBlendshapesJob : IJobParallelFor {
+        [ReadOnly] public NativeReference<GirthFrame> baseGirth;
+        [ReadOnly] public NativeArray<GirthFrame> blendShapeGirths;
+        [ReadOnly] public NativeArray<float> blendshapes;
+        [WriteOnly] public NativeArray<GirthSlice> output;
+        public readonly int blendshapeCount;
+        
+        public SampleBlendshapesJob(NativeReference<GirthFrame> baseGirth, NativeArray<GirthFrame> blendShapeGirths, NativeArray<float> blendshapes, NativeArray<GirthSlice> output, int blendshapeCount) {
+            this.baseGirth = baseGirth;
+            this.blendShapeGirths = blendShapeGirths;
+            this.blendshapes = blendshapes;
+            this.output = output;
+            this.blendshapeCount = blendshapeCount;
+        }
+
+        public void Execute(int index) {
+            var girthSlice = baseGirth.Value.girthCurve.GetSample(index);
+            for (int i = 0; i < blendshapeCount; i++) {
+                float weight = blendshapes[i] * 0.01f;
+                girthSlice += blendShapeGirths[i].girthCurve.GetSample(index) * weight;
+            }
+            output[index] = girthSlice;
+        }
+    }
+
     [BurstCompile]
     public struct SampleTransformsJob : IJobParallelFor {
         public NativeArray<GirthSlice> slices;
@@ -172,12 +284,13 @@ public struct GirthFrame {
     }
 
     public void SampleTransforms(Matrix4x4[] transformBindPoses, Matrix4x4[] localToWorlds, Matrix4x4 penetratorBindPose, Transform rootBone) {
-        int sampleCount = girthCurve.GetSampleCount();
+        int sampleCount = GirthSliceCurve.sampleCount;
         var boneCount = localToWorlds.Length;
         using var slices = new NativeArray<GirthSlice>(sampleCount, Allocator.TempJob);
         using var boneMatrices = new NativeArray<Matrix4x4>(boneCount, Allocator.TempJob);
         using var bindPoses = new NativeArray<Matrix4x4>(boneCount, Allocator.TempJob);
-        slices.CopyFrom(girthCurve.GetSamples());
+        
+        girthCurve.CopyTo(slices);
         boneMatrices.CopyFrom(localToWorlds);
         bindPoses.CopyFrom(transformBindPoses);
 
@@ -190,14 +303,14 @@ public struct GirthFrame {
             inversePenetratorPose = GetDefaultPenetratorPose().inverse
         };
         job.Schedule(sampleCount, 16).Complete();
-        slices.CopyTo(girthCurve.GetSamples());
+        girthCurve.CopyFrom(slices);
     }
     
     
     
     public void ConvertToBlendshape(GirthFrame baseShape) {
-        var samples = girthCurve.GetSampleCount();
-        var blendshapeGirthCurve = girthCurve.Clone();
+        var samples = GirthSliceCurve.sampleCount;
+        var blendshapeGirthCurve = girthCurve;
         for (int i = 0; i < samples; i++) {
             var baseGirth = baseShape.girthCurve.GetSample(i);
             var girthDelta = girthCurve.GetSample(i) - baseGirth;
@@ -213,15 +326,15 @@ public struct GirthFrame {
     private static Material staticMaterialA;
     private static Material staticMaterialB;
     private static Material subtractBlit;
-    public static async Task<GirthFrame> GenerateGirthFrame(RendererSubMeshMask rendererMask, Transform penetratorRoot, Matrix4x4 penetratorBindPose, int blendshapeIndex, float maxGirth, Shader girthUnwrapShader) {
+    public static async Task<GirthFrame> GenerateGirthFrame(SkinnedMeshRendererSubMeshMask skinnedMeshRendererMask, Transform penetratorRoot, Matrix4x4 penetratorBindPose, int blendshapeIndex, float maxGirth, Shader girthUnwrapShader) {
         GirthFrame girthFrame = new GirthFrame(1, maxGirth);
-        var girthMap = new RenderTexture(GirthFrameSamples, GirthFrameSamples, 0, RenderTextureFormat.R8, RenderTextureReadWrite.Linear) {
+        var girthMap = new RenderTexture(GirthSliceCurve.sampleCount, GirthSliceCurve.sampleCount, 0, RenderTextureFormat.R8, RenderTextureReadWrite.Linear) {
             useMipMap = true,
             autoGenerateMips = false,
             wrapModeU = TextureWrapMode.Clamp,
             wrapModeV = TextureWrapMode.Repeat
         };
-        var mesh = rendererMask.GetMesh();
+        var mesh = skinnedMeshRendererMask.renderer.sharedMesh;
         staticVertices.Clear();
         mesh.GetVertices(staticVertices);
         if (blendshapeIndex != -1) {
@@ -236,13 +349,13 @@ public struct GirthFrame {
         bool freemesh = false;
 
         // If we're a skinned mesh renderer, we mask by bone weights.
-        var bones = rendererMask.renderer.bones;
+        var bones = skinnedMeshRendererMask.renderer.bones;
         freemesh = true;
         blitMesh = new Mesh();
         blitMesh.SetVertices(staticVertices);
         blitMesh.subMeshCount = mesh.subMeshCount;
         for (int i = 0; i < mesh.subMeshCount; i++) {
-            if (rendererMask.ShouldDrawSubmesh(i)) {
+            if (skinnedMeshRendererMask.ShouldDrawSubmesh(i)) {
                 staticTriangles.Clear();
                 mesh.GetTriangles(staticTriangles, i);
                 blitMesh.SetTriangles(staticTriangles, i);
@@ -303,7 +416,7 @@ public struct GirthFrame {
         buffer.SetRenderTarget(girthMap);
         buffer.ClearRenderTarget(false, true, Color.clear);
         for (int j = 0; j < mesh.subMeshCount; j++) {
-            if (!rendererMask.ShouldDrawSubmesh(j)) {
+            if (!skinnedMeshRendererMask.ShouldDrawSubmesh(j)) {
                 continue;
             }
 
@@ -372,7 +485,7 @@ public struct GirthFrame {
         var vertices = mesh.vertices;
         var vertexCount = vertices.Length;
         var boneWeights = mesh.boneWeights;
-        var samples = input.girthCurve.GetSampleCount();
+        var samples = GirthSliceCurve.sampleCount;
         for (int i = 0; i < samples; i++) {
             var girthSlice = input.girthCurve.GetSample(i);
             var localPos = penetratorBindPose.MultiplyPoint(girthSlice.position);
@@ -388,11 +501,11 @@ public struct GirthFrame {
             }
             if (nearestVertexIndex != -1) {
                 var weight = boneWeights[nearestVertexIndex];
-                girthSlice.boneWeights = new Vector4(weight.weight0, weight.weight1, weight.weight2, weight.weight3);
-                girthSlice.boneIndex0 = weight.boneIndex0;
-                girthSlice.boneIndex1 = weight.boneIndex1;
-                girthSlice.boneIndex2 = weight.boneIndex2;
-                girthSlice.boneIndex3 = weight.boneIndex3;
+                girthSlice.boneWeights = new half4((half)weight.weight0, (half)weight.weight1, (half)weight.weight2, (half)weight.weight3);
+                girthSlice.boneIndex0 = (short)weight.boneIndex0;
+                girthSlice.boneIndex1 = (short)weight.boneIndex1;
+                girthSlice.boneIndex2 = (short)weight.boneIndex2;
+                girthSlice.boneIndex3 = (short)weight.boneIndex3;
                 input.girthCurve.SetSample(i, girthSlice);
             }
         }
@@ -401,7 +514,7 @@ public struct GirthFrame {
     }
 
     private static GirthFrame PopulateGirthSlices(GirthFrame input, NativeArray<byte> bytes, int width, int height) {
-        input.girthCurve = new GirthSliceCurve(width);
+        input.girthCurve = new GirthSliceCurve();
         for (int x = 0; x < width; x++) {
             GirthSlice slice = new GirthSlice();
             Vector2 positionSum = Vector2.zero;

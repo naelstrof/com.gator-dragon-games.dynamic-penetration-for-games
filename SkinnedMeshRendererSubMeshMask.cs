@@ -22,7 +22,7 @@ using UnityEditor;
 namespace GatorDragonGames.DPG {
 
 #if UNITY_EDITOR
-[CustomPropertyDrawer(typeof(RendererSubMeshMask))]
+[CustomPropertyDrawer(typeof(SkinnedMeshRendererSubMeshMask))]
 public class RendererSubMeshMaskDrawer : PropertyDrawer {
     public override void OnGUI(Rect position, SerializedProperty property, GUIContent label) {
         SerializedProperty rendererProperty = property.FindPropertyRelative("renderer");
@@ -59,8 +59,8 @@ public class RendererSubMeshMaskDrawer : PropertyDrawer {
                 }
 
                 int alloc = i;
-                menu.AddItem(new GUIContent(name), RendererSubMeshMask.GetMask(maskProp.intValue,i), ()=> {
-                    maskProp.intValue = RendererSubMeshMask.ToggleMask(maskProp.intValue, alloc);
+                menu.AddItem(new GUIContent(name), SkinnedMeshRendererSubMeshMask.GetMask(maskProp.intValue,i), ()=> {
+                    maskProp.intValue = SkinnedMeshRendererSubMeshMask.ToggleMask(maskProp.intValue, alloc);
                     maskProp.serializedObject.ApplyModifiedProperties();
                 });
             }
@@ -71,11 +71,11 @@ public class RendererSubMeshMaskDrawer : PropertyDrawer {
 #endif
 
 [System.Serializable]
-public class RendererSubMeshMask : ISerializationCallbackReceiver {
+public struct SkinnedMeshRendererSubMeshMask : ISerializationCallbackReceiver {
     [SerializeField]
     public SkinnedMeshRenderer renderer;
     [SerializeField]
-    public int mask = ~0;
+    public int mask;
 
     public bool ShouldDrawSubmesh(int index) {
         return GetMask(mask, index);
@@ -104,18 +104,6 @@ public class RendererSubMeshMask : ISerializationCallbackReceiver {
         if (mask == 0) {
             mask = ~0;
         }
-    }
-
-    public Mesh GetMesh() {
-        Mesh mesh;
-        if (renderer is SkinnedMeshRenderer skinnedMeshRenderer1) {
-            mesh = skinnedMeshRenderer1.sharedMesh;
-        } else if (renderer is MeshRenderer) {
-            mesh = renderer.GetComponent<MeshFilter>().sharedMesh;
-        } else {
-            throw new UnityException("Girth data can only be generated on SkinnedMeshRenderers and MeshRenderers.");
-        }
-        return mesh;
     }
 }
 

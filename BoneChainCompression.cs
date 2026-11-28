@@ -43,6 +43,21 @@ public struct BoneChainCompression {
             SolveVerlet(compressionPoint);
         }
     }
+    
+    public void UpdateRestLength(float newLength, float compressionPoint) {
+        if (newLength <= 0f || Mathf.Approximately(newLength, restTip)) {
+            return;
+        }
+
+        float scale = newLength / restTip;
+        currentTip *= scale;
+        prevTip *= scale;
+        compressionCurrent *= scale;
+        compressionPrev *= scale;
+        restTip = newLength;
+
+        previousFinalCompression = compressionPoint + compressionCurrent;
+    }
 
     private void SolveVerlet(float compressionPoint) {
         var dt = Time.deltaTime;

@@ -12,8 +12,8 @@ public struct BoneChainOnCurve : INativeDisposable {
     private readonly bool isValid;
     private Transform root;
     private TransformAccessArray _boneChain;
-    
     private NativeArray<float3> _sampledBonePositions;
+    private JobHandle _sampleHandle;
 
     public struct BoneData {
         public float3 localPosition;
@@ -22,7 +22,6 @@ public struct BoneChainOnCurve : INativeDisposable {
         public float3 position;
         public quaternion rotation;
     }
-    private NativeArray<BoneData> _bindTransforms;
     private NativeArray<BoneData> _restTransforms;
     private NativeArray<BoneData> _lastTransforms;
     private NativeArray<AlignInstructions> _alignInstructions;
@@ -33,7 +32,6 @@ public struct BoneChainOnCurve : INativeDisposable {
         var boneCount = bones.Length;
         root = bones[0];
         _boneChain = new TransformAccessArray(bones);
-        _bindTransforms = new NativeArray<BoneData>(boneCount, Allocator.Persistent);
         _restTransforms = new NativeArray<BoneData>(boneCount, Allocator.Persistent);
         _lastTransforms = new NativeArray<BoneData>(boneCount, Allocator.Persistent);
         _sampledBonePositions = new NativeArray<float3>(boneCount, Allocator.Persistent);
@@ -48,9 +46,7 @@ public struct BoneChainOnCurve : INativeDisposable {
             _totalLength += Vector3.Distance(lastPosition, pos);
             lastPosition = pos;
         }
-        var samplePositions = new SamplePose(_bindTransforms);
-        _sampleHandle = samplePositions.Schedule(_boneChain);
-        _sampleHandle.Complete();
+        _sampleHandle = default;
     }
     
     [BurstCompile]
@@ -81,6 +77,10 @@ public struct BoneChainOnCurve : INativeDisposable {
             } else {
                 bone.SetLocalPositionAndRotation(restTransform.localPosition, restTransform.localRotation);
                 bone.localScale = restTransform.localScale;
+                bone.GetPositionAndRotation(out var pos, out var rot);
+                restTransform.position = pos;
+                restTransform.rotation = rot;
+                _restTransforms[index] = restTransform;
             }
         }
     }
@@ -131,19 +131,21 @@ public struct BoneChainOnCurve : INativeDisposable {
     }
 
     [BurstCompile]
-    private struct AlignToSpline : IJob {
+    private struct AlignToSplineCompressible : IJob {
         [WriteOnly] private NativeArray<AlignInstructions> _output;
         [WriteOnly] private NativeReference<float> _totalLength;
         [ReadOnly] private NativeArray<BoneData> _sampledBoneData;
         private int boneCount;
         private Spline3D targetSpline3D;
+        private float lengthMultiplier;
         
-         public AlignToSpline(NativeArray<AlignInstructions> output, NativeArray<BoneData> sampledBoneData, NativeReference<float> totalLength, int boneCount, Spline3D targetSpline3D) {
+         public AlignToSplineCompressible(NativeArray<AlignInstructions> output, NativeArray<BoneData> sampledBoneData, NativeReference<float> totalLength, int boneCount, Spline3D targetSpline3D, float lengthMultiplier) {
             _output = output;
             _sampledBoneData = sampledBoneData;
             this.boneCount = boneCount;
             this.targetSpline3D = targetSpline3D;
             _totalLength = totalLength;
+            this.lengthMultiplier = lengthMultiplier;
          }
         
         public void Execute() {
@@ -152,13 +154,13 @@ public struct BoneChainOnCurve : INativeDisposable {
             
             for (var index = 0; index < boneCount; index++) {
                 var bonePosition = _sampledBoneData[index].position;
-                var boneProjection = math.dot(generalAxis, bonePosition - rootPosition);
+                var boneProjection = math.dot(generalAxis, bonePosition - rootPosition)*lengthMultiplier;
                 var nextBonePosition = bonePosition + generalAxis * 0.1f;
-                var nextBoneProjection = math.dot(generalAxis, nextBonePosition - rootPosition);
+                var nextBoneProjection = math.dot(generalAxis, nextBonePosition - rootPosition)*lengthMultiplier;
                 var axis = generalAxis;
                 if (index < boneCount - 1) {
                     nextBonePosition = _sampledBoneData[index + 1].position;
-                    nextBoneProjection = math.dot(generalAxis, nextBonePosition - rootPosition);
+                    nextBoneProjection = math.dot(generalAxis, nextBonePosition - rootPosition)*lengthMultiplier;
                     axis = math.normalize(_sampledBoneData[index + 1].position - _sampledBoneData[index].position);
                 }
                 var position = targetSpline3D.GetPositionFromDistance(boneProjection);
@@ -174,23 +176,64 @@ public struct BoneChainOnCurve : INativeDisposable {
         }
     }
     
-    private JobHandle _sampleHandle;
+    [BurstCompile]
+    private struct AlignToSplineIncompressible : IJob {
+        [WriteOnly] private NativeArray<AlignInstructions> _output;
+        [WriteOnly] private NativeReference<float> _totalLength;
+        [ReadOnly] private NativeArray<BoneData> _sampledBoneData;
+        private readonly int boneCount;
+        private Spline3D targetSpline3D;
+        private readonly float _lengthMultiplier;
+        
+         public AlignToSplineIncompressible(NativeArray<AlignInstructions> output, NativeArray<BoneData> sampledBoneData, NativeReference<float> totalLength, int boneCount, Spline3D targetSpline3D, float lengthMultiplier) {
+            _output = output;
+            _sampledBoneData = sampledBoneData;
+            this.boneCount = boneCount;
+            this.targetSpline3D = targetSpline3D;
+            _totalLength = totalLength;
+            _lengthMultiplier = lengthMultiplier;
+         }
+        
+        public void Execute() {
+            var totalLength = 0f;
+            var previousSplinePosition = Vector3.zero;
+            var currentBoneLength = 0f;
+            var boneTailVector = Vector3.forward;
+            for (var index = 0; index < boneCount; index++) {
+                var bone = _sampledBoneData[index];
+                var output = new AlignInstructions();
+                if (index < boneCount - 1) {
+                    var nextBone = _sampledBoneData[index + 1];
+                    currentBoneLength = Vector3.Distance(bone.position, nextBone.position);
+                    currentBoneLength *= _lengthMultiplier;
+                    boneTailVector = nextBone.position - bone.position;
+                }
+                totalLength += currentBoneLength;
+                if (index!=0) output.worldPosition = previousSplinePosition;
+                var aimPoint = targetSpline3D.GetPositionFromDistance(totalLength);
+                var aimDirection = math.normalize((float3)aimPoint - bone.position);
+                var fromToRotation = Quaternion.FromToRotation(boneTailVector, aimDirection);
+                output.worldRotation = fromToRotation * bone.rotation;
+                _output[index] = output;
+                previousSplinePosition = aimPoint;
+            }
+            _totalLength.Value = totalLength;
+        }
+    }
 
     public void StartRender() {
         var resetToRestJob = new ResetToRest(_restTransforms, _lastTransforms);
-        var samplePositions = new SamplePose(_lastTransforms);
-        var resetToRestHandle = resetToRestJob.Schedule(_boneChain);
-        _sampleHandle = samplePositions.Schedule(_boneChain, resetToRestHandle);
+        _sampleHandle = resetToRestJob.Schedule(_boneChain);
     }
     
-    public void FinishRender(ref Spline3D onSpline, float blend) {
+    public void FinishRender(ref Spline3D onSpline, float blend, float lengthMultiplier) {
         if (!isValid) {
             Debug.LogError("BoneChainOnCurve is not valid. Please initialize it with a valid array of bones.");
             return;
         }
         
         using var totalLength = new NativeReference<float>(Allocator.TempJob);
-        var alignToSpline = new AlignToSpline(_alignInstructions, _lastTransforms, totalLength, _boneChain.length, onSpline);
+        var alignToSpline = new AlignToSplineCompressible(_alignInstructions, _restTransforms, totalLength, _boneChain.length, onSpline, lengthMultiplier);
         var applyFinalPose = new ApplyFinalPose(_alignInstructions, blend);
         var samplePose = new SamplePose(_lastTransforms);
         

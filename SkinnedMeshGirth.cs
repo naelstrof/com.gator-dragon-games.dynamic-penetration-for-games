@@ -4,12 +4,73 @@ using System.Threading.Tasks;
 using UnityEngine;
 
 namespace GatorDragonGames.DPG {
+
+
+#if UNITY_EDITOR
+using UnityEditor;
+
+[CustomPropertyDrawer(typeof(SkinnedMeshGirth))]
+public class SkinnedMeshGirthDrawer : PropertyDrawer {
+    public override float GetPropertyHeight(SerializedProperty property, GUIContent label) {
+        if (property.isExpanded) {
+            return EditorGUI.GetPropertyHeight(property, label, true)
+                   + EditorGUIUtility.standardVerticalSpacing
+                   + EditorGUIUtility.singleLineHeight;
+        }
+        return EditorGUI.GetPropertyHeight(property, label, true);
+    }
+    public override void OnGUI(Rect position, SerializedProperty property, GUIContent label) {
+        var stableLabel = new GUIContent(label);
+        EditorGUI.BeginProperty(position, stableLabel, property);
+        
+        float fieldHeight = EditorGUI.GetPropertyHeight(property, stableLabel, true);
+        Rect fieldRect = new Rect(position.x, position.y, position.width, fieldHeight);
+        EditorGUI.PropertyField(fieldRect, property, stableLabel, true);
+
+        Rect buttonRect = new Rect(
+            position.x,
+            fieldRect.yMax + EditorGUIUtility.standardVerticalSpacing,
+            position.width,
+            EditorGUIUtility.singleLineHeight
+        );
+
+        if (property.isExpanded && GUI.Button(EditorGUI.IndentedRect(buttonRect), "Generate Girth Lookup")) { 
+            property.serializedObject.ApplyModifiedProperties();
+            var skinnedMeshGirth = (SkinnedMeshGirth)property.boxedValue;
+            Debug.Log("Attempting to generate girth lookup");
+            var task = SkinnedMeshGirth.GenerateGirthLookup(skinnedMeshGirth);
+            task.ContinueWith(t => {
+                if (t.IsFaulted) {
+                    Debug.LogException(t.Exception, property.serializedObject.targetObject);
+                } else {
+                    property.boxedValue = t.Result;
+                    property.serializedObject.ApplyModifiedProperties();
+                    Debug.Log("Girth lookup generation completed!");
+                }
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+        EditorGUI.EndProperty();
+    }
+}
+
+#endif
+
 [Serializable]
 public struct SkinnedMeshGirth {
+    [SerializeField] public SkinnedMeshRendererSubMeshMask skinnedMeshRendererMask;
+    [SerializeField] public Transform[] penetratorBones;
     [SerializeField] public float maxGirth;
     [SerializeField] public GirthFrame baseGirth;
     [SerializeField] public GirthFrame[] girthDeltas;
     [SerializeField] public Matrix4x4 penetratorBindPose;
+    
+#if UNITY_EDITOR
+    public static async Task<SkinnedMeshGirth> GenerateGirthLookup(SkinnedMeshGirth skinnedMeshGirth) {
+        Matrix4x4 bindPose = GirthFrame.GetDefaultPenetratorPose();
+        var girthUnwrapShader = AssetDatabase.LoadAssetAtPath<Shader>(AssetDatabase.GUIDToAssetPath("34d24fe4568f98c4cae4724e139cb644"));
+        return await GenerateGirthLookup(skinnedMeshGirth.skinnedMeshRendererMask, girthUnwrapShader, skinnedMeshGirth.penetratorBones, bindPose);
+    }
+#endif
 
     public struct SkinnedMeshGirthSampler {
         public Matrix4x4[] localToWorlds;
@@ -39,19 +100,23 @@ public struct SkinnedMeshGirth {
             }
         }
     }
+    
+    public SkinnedMeshGirthSampler GetSampler() {
+        return new SkinnedMeshGirthSampler(skinnedMeshRendererMask.renderer);
+    }
 
-    public void DrawGizmos(ref GirthFrame girthFrameMemory, SkinnedMeshRenderer renderer, SkinnedMeshGirthSampler sampler, Transform rootBone, int sampleCount = 128) {
+    public void DrawGizmos(ref GirthFrame girthFrameMemory, SkinnedMeshGirthSampler sampler, int sampleCount = 128) {
         Gizmos.matrix = Matrix4x4.identity;
-        GetGirthFrame(ref girthFrameMemory, renderer, sampler, rootBone);
+        GetGirthFrame(ref girthFrameMemory, sampler);
         girthFrameMemory.DrawGizmos(sampleCount, Color.green, Color.red);
     }
 
-    public void GetGirthFrame(ref GirthFrame output, SkinnedMeshRenderer renderer, SkinnedMeshGirthSampler sampler, Transform rootBone) {
-        baseGirth.Clone(ref output);
-        sampler.Sample(renderer);
+    public void GetGirthFrame(ref GirthFrame output, SkinnedMeshGirthSampler sampler) {
+        output = baseGirth;
+        sampler.Sample(skinnedMeshRendererMask.renderer);
         output.SampleBlendshapes(girthDeltas, sampler);
-        output.SampleTransforms(sampler.bindPoses, sampler.localToWorlds, penetratorBindPose, rootBone);
-        output.TransformToWorld(rootBone.localToWorldMatrix);
+        output.SampleTransforms(sampler.bindPoses, sampler.localToWorlds, penetratorBindPose, penetratorBones[0]);
+        output.TransformToWorld(penetratorBones[0].localToWorldMatrix);
     }
 
     public static void GetBindPoseBoneLocalPositionRotation(Matrix4x4 boneMatrix, out Vector3 position, out Quaternion rotation, out float scale) {
@@ -76,10 +141,10 @@ public struct SkinnedMeshGirth {
         }
     }
 
-    private static float GetMaxGirth(RendererSubMeshMask rendererMask, Transform penetratorRoot, Vector3 rendererLocalPenetratorForward, Vector3 rendererLocalPenetratorRoot, List<Vector3> staticVertices) {
+    private static float GetMaxGirth(SkinnedMeshRendererSubMeshMask skinnedMeshRendererMask, Transform penetratorRoot, Vector3 rendererLocalPenetratorForward, Vector3 rendererLocalPenetratorRoot, List<Vector3> staticVertices) {
         float maxGirth = 0f;
         staticVertices.Clear();
-        var mesh = rendererMask.GetMesh();
+        var mesh = skinnedMeshRendererMask.renderer.sharedMesh;
         mesh.GetVertices(staticVertices);
         Vector3[] blendDeltaVertices = new Vector3[staticVertices.Count];
         for (int blendshapeIndex = -1; blendshapeIndex < mesh.blendShapeCount; blendshapeIndex++) {
@@ -90,40 +155,30 @@ public struct SkinnedMeshGirth {
                 blendDeltaVertices[i] += staticVertices[i];
             }
 
-            // If we're a skinned mesh renderer, we mask by bone weights.
-            if (rendererMask.renderer is SkinnedMeshRenderer meshRenderer) {
-                var bones = meshRenderer.bones;
-                HashSet<int> validBones = new HashSet<int>();
-                for (int i = 0; i < bones.Length; i++) {
-                    if (bones[i].IsChildOf(penetratorRoot)) {
-                        validBones.Add(i);
-                    }
+            var bones = skinnedMeshRendererMask.renderer.bones;
+            HashSet<int> validBones = new HashSet<int>();
+            for (int i = 0; i < bones.Length; i++) {
+                if (bones[i].IsChildOf(penetratorRoot)) {
+                    validBones.Add(i);
                 }
+            }
 
-                var weights = mesh.GetAllBoneWeights();
-                var bonesPerVertex = mesh.GetBonesPerVertex();
-                int vt = 0;
-                int wt = 0;
-                for (int o = 0; o < bonesPerVertex.Length; o++) {
-                    for (int p = 0; p < bonesPerVertex[o]; p++) {
-                        BoneWeight1 weight = weights[wt];
-                        if (validBones.Contains(weight.boneIndex) && weight.weight > 0.1f) {
-                            Vector3 pos = blendDeltaVertices[vt];
-                            float length = Vector3.Dot(rendererLocalPenetratorForward, pos - rendererLocalPenetratorRoot);
-                            float girth = Vector3.Distance(pos, (rendererLocalPenetratorRoot + rendererLocalPenetratorForward * length));
-                            maxGirth = Mathf.Max(girth, maxGirth);
-                        }
-                        wt++;
+            var weights = mesh.GetAllBoneWeights();
+            var bonesPerVertex = mesh.GetBonesPerVertex();
+            int vt = 0;
+            int wt = 0;
+            for (int o = 0; o < bonesPerVertex.Length; o++) {
+                for (int p = 0; p < bonesPerVertex[o]; p++) {
+                    BoneWeight1 weight = weights[wt];
+                    if (validBones.Contains(weight.boneIndex) && weight.weight > 0.1f) {
+                        Vector3 pos = blendDeltaVertices[vt];
+                        float length = Vector3.Dot(rendererLocalPenetratorForward, pos - rendererLocalPenetratorRoot);
+                        float girth = Vector3.Distance(pos, (rendererLocalPenetratorRoot + rendererLocalPenetratorForward * length));
+                        maxGirth = Mathf.Max(girth, maxGirth);
                     }
-                    vt++;
+                    wt++;
                 }
-            } else {
-                // Otherwise we can just use every vert.
-                foreach (Vector3 vertexPosition in blendDeltaVertices) {
-                    float length = Vector3.Dot(rendererLocalPenetratorForward, vertexPosition - rendererLocalPenetratorRoot);
-                    float girth = Vector3.Distance(vertexPosition, (rendererLocalPenetratorRoot + rendererLocalPenetratorForward * length));
-                    maxGirth = Mathf.Max(girth, maxGirth);
-                }
+                vt++;
             }
         }
         return maxGirth;
@@ -139,9 +194,9 @@ public struct SkinnedMeshGirth {
         return false;
     }
     
-    public static async Task<SkinnedMeshGirth> GenerateGirthLookup(RendererSubMeshMask rendererWithMask, Shader girthUnwrapShader, Transform[] bones, Matrix4x4 penetratorLocalPose) {
+    public static async Task<SkinnedMeshGirth> GenerateGirthLookup(SkinnedMeshRendererSubMeshMask skinnedMeshRendererWithMask, Shader girthUnwrapShader, Transform[] bones, Matrix4x4 penetratorLocalPose) {
         var penetratorRoot = bones[0];
-        var skinnedMeshRenderer = rendererWithMask.renderer;
+        var skinnedMeshRenderer = skinnedMeshRendererWithMask.renderer;
         if (!TryGetBoneIndex(skinnedMeshRenderer.bones, penetratorRoot, out int rootBoneID)) {
             throw new UnityException("You must choose a bone on the armature...");
         }
@@ -152,13 +207,13 @@ public struct SkinnedMeshGirth {
         var rendererBindPose = Matrix4x4.TRS(posePosition, poseRotation, new Vector3(scale, scale, scale)) * penetratorLocalPose;
 
         var staticVertices = new List<Vector3>();
-        var maxGirth = GetMaxGirth(rendererWithMask, penetratorRoot, rendererBindPose.MultiplyVector(Vector3.forward), rendererBindPose.MultiplyPoint(Vector3.zero), staticVertices);
+        var maxGirth = GetMaxGirth(skinnedMeshRendererWithMask, penetratorRoot, rendererBindPose.MultiplyVector(Vector3.forward), rendererBindPose.MultiplyPoint(Vector3.zero), staticVertices);
         
-        var baseGirth = await GirthFrame.GenerateGirthFrame(rendererWithMask, penetratorRoot, rendererBindPose, -1, maxGirth, girthUnwrapShader);
-        var blendshapeCount = rendererWithMask.GetMesh().blendShapeCount;
+        var baseGirth = await GirthFrame.GenerateGirthFrame(skinnedMeshRendererWithMask, penetratorRoot, rendererBindPose, -1, maxGirth, girthUnwrapShader);
+        var blendshapeCount = skinnedMeshRendererWithMask.renderer.sharedMesh.blendShapeCount;
         var blendshapeGirths = new GirthFrame[blendshapeCount];
         for (int i = 0; i < blendshapeCount; i++) {
-            var blendshapeGirth = await GirthFrame.GenerateGirthFrame(rendererWithMask, penetratorRoot, rendererBindPose, i, maxGirth, girthUnwrapShader);
+            var blendshapeGirth = await GirthFrame.GenerateGirthFrame(skinnedMeshRendererWithMask, penetratorRoot, rendererBindPose, i, maxGirth, girthUnwrapShader);
             blendshapeGirth.ConvertToBlendshape(baseGirth);
             blendshapeGirths[i] = blendshapeGirth;
         }
@@ -166,7 +221,9 @@ public struct SkinnedMeshGirth {
             baseGirth = baseGirth,
             girthDeltas = blendshapeGirths,
             maxGirth = maxGirth,
-            penetratorBindPose = rendererBindPose
+            penetratorBindPose = rendererBindPose,
+            penetratorBones = bones,
+            skinnedMeshRendererMask = skinnedMeshRendererWithMask
         };
     }
 }
