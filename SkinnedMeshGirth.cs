@@ -1,7 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Unity.Burst;
+using Unity.Collections;
+using Unity.Jobs;
 using UnityEngine;
+using UnityEngine.Jobs;
 
 namespace GatorDragonGames.DPG {
 
@@ -72,32 +76,56 @@ public struct SkinnedMeshGirth {
     }
 #endif
 
-    public struct SkinnedMeshGirthSampler {
+    public struct SkinnedMeshGirthSampler : INativeDisposable {
         public Matrix4x4[] localToWorlds;
         public Matrix4x4[] bindPoses;
-        public Transform[] bones;
+        private TransformAccessArray bones;
         public float[] blendshapes;
 
         public SkinnedMeshGirthSampler(SkinnedMeshRenderer renderer) {
             var boneCount = renderer.bones.Length;
             localToWorlds = new Matrix4x4[boneCount];
-            bones = renderer.bones;
+            bones = new TransformAccessArray(renderer.bones);
             for(int i=0;i<boneCount;i++) {
                 localToWorlds[i] = bones[i].localToWorldMatrix;
             }
             bindPoses = renderer.sharedMesh.bindposes;
             blendshapes = new float[renderer.sharedMesh.blendShapeCount];
         }
-
+        
         public void Sample(SkinnedMeshRenderer renderer) {
-            var boneCount = bones.Length;
-            for(int i=0;i<boneCount;i++) {
-                localToWorlds[i] = bones[i].localToWorldMatrix;
-            }
+            var data = new NativeArray<Matrix4x4>(localToWorlds, Allocator.TempJob);
+            var job = new SampleBones(data);
+            var handle = job.Schedule(bones);
+            handle.Complete();
+            data.CopyTo(localToWorlds);
+            data.Dispose();
+            
             var blendshapeLength = blendshapes.Length;
             for(int i=0;i<blendshapeLength;i++) {
                 blendshapes[i] = renderer.GetBlendShapeWeight(i);
             }
+        }
+        [BurstCompile]
+        private struct SampleBones : IJobParallelForTransform {
+            [WriteOnly] private NativeArray<Matrix4x4> _localToWorlds;
+        
+            public SampleBones(NativeArray<Matrix4x4> _localToWorlds) {
+                this._localToWorlds = _localToWorlds;
+            }
+        
+            public void Execute(int index, TransformAccess bone) {
+                _localToWorlds[index] = bone.localToWorldMatrix;
+            }
+        }
+
+        public void Dispose() {
+            bones.Dispose();
+        }
+
+        public JobHandle Dispose(JobHandle inputDeps) {
+            bones.Dispose();
+            return inputDeps;
         }
     }
     

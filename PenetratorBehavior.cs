@@ -52,6 +52,7 @@ public class PenetratorBehavior : MonoBehaviour {
     private void OnDisable() {
         JigglePhysics.JigglePhysics.JigglePoseCompleted -= OnJigglePoseCompleted;
         boneChainOnCurve.Dispose();
+        skinnedMeshGirthSampler.Dispose();
     }
     
     private void LateUpdate() {
@@ -100,7 +101,8 @@ public class PenetratorBehavior : MonoBehaviour {
         } else {
             if (skinnedMeshRendererMask.renderer == null) return;
             if (bones == null || bones.Length < 1 || bones[0] == null) return;
-            skinnedMeshGirth.DrawGizmos(ref penetrationGirthFrame, skinnedMeshGirth.GetSampler(), GirthSliceCurve.sampleCount);
+            using var sampler = skinnedMeshGirth.GetSampler();
+            skinnedMeshGirth.DrawGizmos(ref penetrationGirthFrame, sampler, GirthSliceCurve.sampleCount);
         }
     }
 
